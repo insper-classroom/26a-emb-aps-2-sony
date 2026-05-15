@@ -62,16 +62,16 @@ Os dados enviados representarão:
 
 ## Tasks
 - `task_sensor`
-  - Responsável por ler os sensores de movimento do skate.
+  - Lê a IMU e envia comandos de movimento para `task_bluetooth` e `task_led`.
 
 - `task_buttons`
-  - Responsável pela leitura dos botões.
+  - Recebe eventos dos botões, faz o tratamento/debounce e envia comandos para `task_bluetooth`.
 
 - `task_bluetooth`
-  - Responsável pelo envio dos comandos via Bluetooth.
+  - Recebe comandos de movimento e botões, e envia via Bluetooth para o computador.
 
 - `task_led`
-  - Responsável por controlar o LED RGB de acordo com o movimento detectado.
+  - Controla o LED RGB com base no movimento detectado.
 
 ---
 
@@ -85,20 +85,15 @@ Os dados enviados representarão:
 - `xQueueLed`
   - Envia dados de movimento da `task_sensor` para `task_led`.
 
----
-
-## Semáforos
-- `xSemaphoreBluetooth`
-  - Indica conexão Bluetooth ativa.
-
-- `xSemaphoreSend`
-  - Libera envio de dados para comunicação.
 
 ---
 
 ## ISR (Interrupções)
 - `gpio_irq_handler`
-  - Responsável por detectar eventos rápidos dos botões.
+  - Captura interrupções dos botões e envia eventos para a `task_buttons` usando a fila `xQueueButtons`.
 
 ---
 
+## Diagrama
+
+![Diagrama RTOS](images/diagrama.png)

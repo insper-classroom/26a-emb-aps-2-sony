@@ -8,6 +8,8 @@ O projeto consiste em um controle físico para o jogo *Subway Surfers*, utilizan
 # Ideia do Controle
 O controle será baseado nos movimentos do skate. Sensores instalados no sistema irão detectar inclinações e movimentações, permitindo controlar as ações do jogo, como desviar para os lados, pular ou abaixar.
 
+Um **LED RGB** instalado no skate muda de cor de acordo com o movimento detectado, dando feedback visual ao jogador em tempo real.
+
 Além disso, o sistema contará com quatro botões auxiliares:
 
 - Botão **START** → inicia o jogo;
@@ -39,6 +41,7 @@ Sensores e dispositivos utilizados para capturar informações:
 ## Outputs (Saídas)
 Dispositivos responsáveis por resposta visual ou comunicação:
 
+- LED RGB (feedback visual do movimento);
 - Comunicação Bluetooth com o computador;
 - Envio de comandos para o jogo.
 
@@ -67,6 +70,8 @@ Os dados enviados representarão:
 - `task_bluetooth`
   - Responsável pelo envio dos comandos via Bluetooth.
 
+- `task_led`
+  - Responsável por controlar o LED RGB de acordo com o movimento detectado.
 
 ---
 
@@ -76,6 +81,9 @@ Os dados enviados representarão:
 
 - `xQueueButtons`
   - Envia eventos dos botões para `task_bluetooth`.
+
+- `xQueueLed`
+  - Envia dados de movimento da `task_sensor` para `task_led`.
 
 ---
 
@@ -94,27 +102,3 @@ Os dados enviados representarão:
 
 ---
 
-# Estrutura Geral do Sistema
-
-```text
-        +------------------+
-        |  Sensor IMU      |
-        +------------------+
-                 |
-                 v
-          task_sensor
-                 |
-          xQueueMotion
-                 |
-                 v
-         task_bluetooth <------ xQueueButtons
-                 ^                     ^
-                 |                     |
-      xSemaphoreBluetooth      task_buttons
-                 |
-                 v
-          Comunicação
-            Bluetooth
-                 |
-                 v
-            Subway Surfers

@@ -59,6 +59,19 @@ file(GLOB_RECURSE EI_CMSIS_SOURCES
     "${EI_SDK_FOLDER}/CMSIS/DSP/Source/FastMathFunctions/*.c"
     "${EI_SDK_FOLDER}/CMSIS/DSP/Source/SupportFunctions/*.c"
     "${EI_SDK_FOLDER}/CMSIS/DSP/Source/StatisticsFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/MatrixFunctions/*.c"
+)
+file(GLOB_RECURSE EI_CMSIS_NN_SOURCES
+    "${EI_SDK_FOLDER}/CMSIS/NN/Source/*.c"
+)
+file(GLOB_RECURSE EI_TF_KERNELS_INTERNAL_SOURCES
+    "${EI_SDK_FOLDER}/tensorflow/lite/kernels/internal/portable_tensor_utils.cc"
+    "${EI_SDK_FOLDER}/tensorflow/lite/kernels/internal/tensor_utils.cc"
+    "${EI_SDK_FOLDER}/tensorflow/lite/kernels/internal/reference_portable_tensor_utils.cc"
+    "${EI_SDK_FOLDER}/tensorflow/lite/kernels/kernel_util_lite.cc"
+)
+file(GLOB EI_TF_CORE_API_SOURCES
+    "${EI_SDK_FOLDER}/tensorflow/lite/core/api/*.cc"
 )
 
 # Remove arquivos de plataformas incompatíveis
@@ -81,7 +94,10 @@ add_executable(pico_emb
     ${EI_TF_C_SOURCES}
     ${EI_TF_MICRO_SOURCES}
     ${EI_TF_CORE_SOURCES}
+    ${EI_TF_CORE_API_SOURCES}
     ${EI_CMSIS_SOURCES}
+    ${EI_CMSIS_NN_SOURCES}
+    ${EI_TF_KERNELS_INTERNAL_SOURCES}
     )
 
 pico_enable_stdio_usb(pico_emb 1)
@@ -92,6 +108,7 @@ target_include_directories(pico_emb PRIVATE
     ${MODEL_FOLDER}
     ${EI_SDK_FOLDER}/CMSIS/Core/Include
     ${EI_SDK_FOLDER}/CMSIS/DSP/Include
+    ${EI_SDK_FOLDER}/CMSIS/NN/Include
     )
 
 # Linking to FreeRTOS-Kernel-Heap4 means we use a dynamic heap for allocations

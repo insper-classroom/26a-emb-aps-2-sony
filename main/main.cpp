@@ -85,10 +85,8 @@ static void mpu6050_read_accel(float *ax, float *ay, float *az) {
     *az = (z / MPU_ACCEL_2G_SENSITIVITY) * 9.80665f;
 }
 
-/* EI porting layer must be defined before including the classifier */
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* EI porting layer — plain C++ linkage (matches tflite compiled model declarations) */
+#include "edge-impulse-sdk/dsp/returntypes.h"
 
 void ei_printf(const char *format, ...) {
     va_list args;
@@ -119,15 +117,11 @@ void ei_free(void *ptr) {
         free(ptr);
 }
 
-int ei_run_impulse_check_canceled(void) { return 0; /* EI_IMPULSE_OK */ }
-void ei_serial_set_baudrate(int baud)   { (void)baud; }
-uint64_t ei_read_timer_ms(void)         { return to_ms_since_boot(get_absolute_time()); }
-uint64_t ei_read_timer_us(void)         { return to_us_since_boot(get_absolute_time()); }
-void ei_sleep(int32_t ms)               { vTaskDelay(pdMS_TO_TICKS(ms)); }
-
-#ifdef __cplusplus
-}
-#endif
+EI_IMPULSE_ERROR ei_run_impulse_check_canceled(void) { return EI_IMPULSE_OK; }
+void ei_serial_set_baudrate(int baud)                { (void)baud; }
+uint64_t ei_read_timer_ms(void)                      { return to_ms_since_boot(get_absolute_time()); }
+uint64_t ei_read_timer_us(void)                      { return to_us_since_boot(get_absolute_time()); }
+EI_IMPULSE_ERROR ei_sleep(int32_t ms)                { vTaskDelay(pdMS_TO_TICKS(ms)); return EI_IMPULSE_OK; }
 
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 #include "edge-impulse-sdk/dsp/numpy.hpp"
@@ -163,9 +157,9 @@ void ei_sleep(int32_t ms)               { vTaskDelay(pdMS_TO_TICKS(ms)); }
  *   3 = "left"      → inclinar para esquerda           → mover esquerda
  *   4 = "right"     → inclinar para direita            → mover direita
  */
-#define LABEL_BACKWARD 0
-#define LABEL_FORWARD  1
-#define LABEL_IDLE     2
+#define LABEL_CROUNCH  0
+#define LABEL_IDLE     1
+#define LABEL_JUMP     2
 #define LABEL_LEFT     3
 #define LABEL_RIGHT    4
 
@@ -310,11 +304,11 @@ static void task_bluetooth(void *param) {
             if (motion != last_motion) {
                 last_motion = motion;
                 switch (motion) {
-                    case LABEL_IDLE:     send_cmd(CMD_IDLE);   break;
-                    case LABEL_FORWARD:  send_cmd(CMD_JUMP);   break;  /* frente  → pular  */
-                    case LABEL_BACKWARD: send_cmd(CMD_CROUCH); break;  /* trás    → agachar*/
-                    case LABEL_LEFT:     send_cmd(CMD_LEFT);   break;
-                    case LABEL_RIGHT:    send_cmd(CMD_RIGHT);  break;
+                    case LABEL_IDLE:    send_cmd(CMD_IDLE);   break;
+                    case LABEL_JUMP:    send_cmd(CMD_JUMP);   break;
+                    case LABEL_CROUNCH: send_cmd(CMD_CROUCH); break;
+                    case LABEL_LEFT:    send_cmd(CMD_LEFT);   break;
+                    case LABEL_RIGHT:   send_cmd(CMD_RIGHT);  break;
                     default:             break;
                 }
             }
@@ -359,11 +353,11 @@ static void task_led(void *param) {
         if (xQueueReceive(xQueueLed, &label, portMAX_DELAY) == pdTRUE) {
             gpio_put(DBG_LED, 1);
             switch (label) {
-                case LABEL_IDLE:   set_rgb(0, 0, 0); break; /* off   */
-                case LABEL_FORWARD:  set_rgb(0, 0, 1); break; /* blue   = pular  */
-                case LABEL_BACKWARD: set_rgb(1, 0, 1); break; /* purple = agachar*/
-                case LABEL_LEFT:     set_rgb(0, 1, 0); break; /* green  = esq    */
-                case LABEL_RIGHT:    set_rgb(1, 1, 0); break; /* yellow = dir    */
+                case LABEL_IDLE:    set_rgb(0, 0, 0); break; /* off    */
+                case LABEL_JUMP:    set_rgb(0, 0, 1); break; /* blue   = pular  */
+                case LABEL_CROUNCH: set_rgb(1, 0, 1); break; /* purple = agachar*/
+                case LABEL_LEFT:    set_rgb(0, 1, 0); break; /* green  = esq    */
+                case LABEL_RIGHT:   set_rgb(1, 1, 0); break; /* yellow = dir    */
                 default:           set_rgb(1, 0, 0); break; /* red = unknown */
             }
             gpio_put(DBG_LED, 0);

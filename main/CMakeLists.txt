@@ -30,9 +30,58 @@ set(EI_PLATFORM_FOLDER ${CMAKE_SOURCE_DIR}/edge-impulse)
 set(FIRMWARE_SDK_FOLDER ${CMAKE_SOURCE_DIR}/firmware-sdk)
 
 
-# Example running FreeRTOS on 1 core
+# ── Coleta de fontes do EI SDK ────────────────────────────────────────────────
+
+file(GLOB_RECURSE EI_MODEL_SOURCES
+    "${MODEL_FOLDER}/tflite-model/*.cpp"
+)
+file(GLOB EI_CLASSIFIER_SOURCES
+    "${EI_SDK_FOLDER}/classifier/*.cpp"
+)
+file(GLOB_RECURSE EI_DSP_SOURCES
+    "${EI_SDK_FOLDER}/dsp/*.cpp"
+)
+file(GLOB EI_TF_C_SOURCES
+    "${EI_SDK_FOLDER}/tensorflow/lite/c/*.cc"
+)
+file(GLOB_RECURSE EI_TF_MICRO_SOURCES
+    "${EI_SDK_FOLDER}/tensorflow/lite/micro/*.cc"
+    "${EI_SDK_FOLDER}/tensorflow/lite/kernels/internal/quantization_util.cc"
+)
+file(GLOB_RECURSE EI_TF_CORE_SOURCES
+    "${EI_SDK_FOLDER}/tensorflow/lite/core/c/*.cc"
+)
+file(GLOB_RECURSE EI_CMSIS_SOURCES
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/TransformFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/CommonTables/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/ComplexMathFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/BasicMathFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/FastMathFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/SupportFunctions/*.c"
+    "${EI_SDK_FOLDER}/CMSIS/DSP/Source/StatisticsFunctions/*.c"
+)
+
+# Remove arquivos de plataformas incompatíveis
+foreach(SRC_LIST EI_TF_MICRO_SOURCES EI_TF_CORE_SOURCES EI_DSP_SOURCES EI_CMSIS_SOURCES)
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*/zephyr/.*")
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*/espressif/.*")
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*/ethos.*")
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*debug_log.*")
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*/examples/.*")
+    list(FILTER ${SRC_LIST} EXCLUDE REGEX ".*/test.*")
+endforeach()
+
+# ── Executável ────────────────────────────────────────────────────────────────
+
 add_executable(pico_emb
     main.cpp
+    ${EI_MODEL_SOURCES}
+    ${EI_CLASSIFIER_SOURCES}
+    ${EI_DSP_SOURCES}
+    ${EI_TF_C_SOURCES}
+    ${EI_TF_MICRO_SOURCES}
+    ${EI_TF_CORE_SOURCES}
+    ${EI_CMSIS_SOURCES}
     )
 
 pico_enable_stdio_usb(pico_emb 1)
@@ -40,6 +89,9 @@ pico_enable_stdio_uart(pico_emb 0)
 
 target_include_directories(pico_emb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${MODEL_FOLDER}
+    ${EI_SDK_FOLDER}/CMSIS/Core/Include
+    ${EI_SDK_FOLDER}/CMSIS/DSP/Include
     )
 
 # Linking to FreeRTOS-Kernel-Heap4 means we use a dynamic heap for allocations
@@ -60,6 +112,12 @@ target_link_libraries(pico_emb PRIVATE
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here
 target_compile_definitions(pico_emb PRIVATE
     configNUMBER_OF_CORES=1
+    EI_CLASSIFIER_COMPILED=1
+    EIDSP_USE_CMSIS_DSP=1
+    EIDSP_LOAD_CMSIS_DSP_SOURCES=1
+    ARM_MATH_CM0PLUS
+    __FPU_PRESENT=1
+    DISABLEFLOAT16=1
     )
 if(PICO_CYW43_SUPPORTED)
     # For led support on pico_w

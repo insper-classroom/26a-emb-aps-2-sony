@@ -27,7 +27,7 @@ BAUD_RATE = 9600
 KEY_WAVE = Key.left
 
 COMMANDS = {
-    b'J': Key.space,   # jump   → pular       (Space)
+    b'J': Key.up,      # jump   → pular       (↑  — padrão BlueStacks)
     b'L': Key.left,    # left   → esquerda    (←)
     b'R': Key.right,   # right  → direita     (→)
     b'C': Key.down,    # crouch → abaixar     (↓)
@@ -143,7 +143,7 @@ def run(port: str):
                 if key is not None:
                     last_sent[cmd] = now
                     label = {
-                        b'J': "PULAR    Space",
+                        b'J': "PULAR    ↑",
                         b'L': "ESQUERDA ←",
                         b'R': "DIREITA  →",
                         b'C': "ABAIXAR  ↓",

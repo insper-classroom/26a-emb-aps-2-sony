@@ -150,15 +150,31 @@ void ei_sleep(int32_t ms)               { vTaskDelay(pdMS_TO_TICKS(ms)); }
 #define BTN_ID_PAUSE   1   /* GP5 */
 #define BTN_ID_VOLUME  2   /* GP6 */
 
-/* Motion label indices (must match EI model categories order) */
-#define LABEL_IDLE    0
-#define LABEL_UPDOWN  1
-#define LABEL_WAVE    2
+/*
+ * Motion label indices — devem bater com a ordem ALFABÉTICA das classes
+ * no Edge Impulse (ele ordena por nome). Ao exportar o modelo, confirme em:
+ *   ei-model/model-parameters/model_variables.h
+ *   ei_classifier_inferencing_categories[] = { ..., ..., ... }
+ *
+ * Classes sugeridas para treino (nomes em inglês, ordem alfabética):
+ *   0 = "backward"  → tail down / empurrar para trás  → agachar no jogo
+ *   1 = "forward"   → nose down / empurrar para frente → pular no jogo
+ *   2 = "idle"      → parado / rolando reto            → nada
+ *   3 = "left"      → inclinar para esquerda           → mover esquerda
+ *   4 = "right"     → inclinar para direita            → mover direita
+ */
+#define LABEL_BACKWARD 0
+#define LABEL_FORWARD  1
+#define LABEL_IDLE     2
+#define LABEL_LEFT     3
+#define LABEL_RIGHT    4
 
-/* BT command bytes */
+/* BT command bytes (devem bater com controller.py) */
 #define CMD_IDLE   'I'
 #define CMD_JUMP   'J'
-#define CMD_WAVE   'W'
+#define CMD_LEFT   'L'
+#define CMD_RIGHT  'R'
+#define CMD_CROUCH 'C'
 #define CMD_START  'S'
 #define CMD_PAUSE  'P'
 #define CMD_VOLUME 'V'
@@ -294,10 +310,12 @@ static void task_bluetooth(void *param) {
             if (motion != last_motion) {
                 last_motion = motion;
                 switch (motion) {
-                    case LABEL_IDLE:   send_cmd(CMD_IDLE);  break;
-                    case LABEL_UPDOWN: send_cmd(CMD_JUMP);  break;
-                    case LABEL_WAVE:   send_cmd(CMD_WAVE);  break;
-                    default:           break;
+                    case LABEL_IDLE:     send_cmd(CMD_IDLE);   break;
+                    case LABEL_FORWARD:  send_cmd(CMD_JUMP);   break;  /* frente  → pular  */
+                    case LABEL_BACKWARD: send_cmd(CMD_CROUCH); break;  /* trás    → agachar*/
+                    case LABEL_LEFT:     send_cmd(CMD_LEFT);   break;
+                    case LABEL_RIGHT:    send_cmd(CMD_RIGHT);  break;
+                    default:             break;
                 }
             }
         }
@@ -342,8 +360,10 @@ static void task_led(void *param) {
             gpio_put(DBG_LED, 1);
             switch (label) {
                 case LABEL_IDLE:   set_rgb(0, 0, 0); break; /* off   */
-                case LABEL_UPDOWN: set_rgb(0, 0, 1); break; /* blue  */
-                case LABEL_WAVE:   set_rgb(0, 1, 0); break; /* green */
+                case LABEL_FORWARD:  set_rgb(0, 0, 1); break; /* blue   = pular  */
+                case LABEL_BACKWARD: set_rgb(1, 0, 1); break; /* purple = agachar*/
+                case LABEL_LEFT:     set_rgb(0, 1, 0); break; /* green  = esq    */
+                case LABEL_RIGHT:    set_rgb(1, 1, 0); break; /* yellow = dir    */
                 default:           set_rgb(1, 0, 0); break; /* red = unknown */
             }
             gpio_put(DBG_LED, 0);

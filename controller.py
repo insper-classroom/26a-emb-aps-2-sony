@@ -32,9 +32,10 @@ COMMANDS = {
     b'R': Key.right,   # right  → direita     (→)
     b'C': Key.down,    # crouch → abaixar     (↓)
     b'I': None,        # idle   → nada
-    b'S': Key.enter,   # start  → Enter
-    b'P': 'p',         # pause  → P
-    b'V': None,        # volume → sem mapeamento
+    b'S': Key.enter,   # start      → Enter
+    b'P': 'p',         # pause      → P
+    b'V': None,        # volume up  → sem mapeamento no jogo
+    b'D': None,        # volume down → sem mapeamento no jogo
 }
 
 # Cooldown mínimo entre o mesmo comando (ms) — evita spam de tecla
@@ -101,8 +102,9 @@ def run(port: str):
         sys.exit(1)
 
     print("Conectado! Aguardando comandos do skate...\n")
-    print("  J = pular (Space)     W = esquivar (←)")
-    print("  S = start (Enter)     P = pause (P)")
+    print("  J = pular (↑)        C = agachar (↓)")
+    print("  L = esquerda (←)    R = direita (→)")
+    print("  S = start (Enter)   P = pause (P)")
     print("  Ctrl+C para sair\n")
 
     buffer = b""
@@ -146,9 +148,11 @@ def run(port: str):
                         b'J': "PULAR    ↑",
                         b'L': "ESQUERDA ←",
                         b'R': "DIREITA  →",
-                        b'C': "ABAIXAR  ↓",
+                        b'C': "AGACHAR  ↓",
                         b'S': "START    ↵",
                         b'P': "PAUSE    P",
+                        b'V': "VOL UP    ",
+                        b'D': "VOL DOWN  ",
                     }.get(cmd, cmd.decode(errors='?'))
                     print(f"[{time.strftime('%H:%M:%S')}] {label}")
                     press_key(key)

@@ -33,8 +33,8 @@
 
 /* ── MPU6050 driver (I2C0, SDA=GP0, SCL=GP1) ────────────────────────────── */
 #define MPU_I2C      i2c0
-#define MPU_SDA_PIN  0
-#define MPU_SCL_PIN  1
+#define MPU_SDA_PIN  16
+#define MPU_SCL_PIN  17
 #define MPU_ADDR     MPU6050_I2C_DEFAULT   /* 0x68 */
 #define MPU_ACCEL_2G_SENSITIVITY 16384.0f  /* LSB/g at ±2g range */
 
@@ -129,9 +129,9 @@ EI_IMPULSE_ERROR ei_sleep(int32_t ms)                { vTaskDelay(pdMS_TO_TICKS(
 /* -------------------------------------------------------------------------- */
 /* Pin / peripheral config                                                     */
 /* -------------------------------------------------------------------------- */
-#define BT_UART_ID   uart0
-#define BT_TX_PIN    12
-#define BT_RX_PIN    13
+#define BT_UART_ID   uart1
+#define BT_TX_PIN    5
+#define BT_RX_PIN    4
 #define BT_BAUD      9600
 
 /* Debug GPIO for WCET / jitter measurement with an oscilloscope */
@@ -140,9 +140,10 @@ EI_IMPULSE_ERROR ei_sleep(int32_t ms)                { vTaskDelay(pdMS_TO_TICKS(
 #define DBG_LED      22
 
 /* Button IDs sent over xQueueButtons */
-#define BTN_ID_START   0   /* GP4 */
-#define BTN_ID_PAUSE   1   /* GP5 */
-#define BTN_ID_VOLUME  2   /* GP6 */
+#define BTN_ID_START    0   /* GP18 BRANCO  */
+#define BTN_ID_PAUSE    1   /* GP19 AZUL    */
+#define BTN_ID_VOL_UP   2   /* GP20 AMARELO */
+#define BTN_ID_VOL_DOWN 3   /* GP21 VERDE   */
 
 /*
  * Motion label indices — devem bater com a ordem ALFABÉTICA das classes
@@ -164,14 +165,15 @@ EI_IMPULSE_ERROR ei_sleep(int32_t ms)                { vTaskDelay(pdMS_TO_TICKS(
 #define LABEL_RIGHT    4
 
 /* BT command bytes (devem bater com controller.py) */
-#define CMD_IDLE   'I'
-#define CMD_JUMP   'J'
-#define CMD_LEFT   'L'
-#define CMD_RIGHT  'R'
-#define CMD_CROUCH 'C'
-#define CMD_START  'S'
-#define CMD_PAUSE  'P'
-#define CMD_VOLUME 'V'
+#define CMD_IDLE     'I'
+#define CMD_JUMP     'J'
+#define CMD_LEFT     'L'
+#define CMD_RIGHT    'R'
+#define CMD_CROUCH   'C'
+#define CMD_START    'S'
+#define CMD_PAUSE    'P'
+#define CMD_VOL_UP   'V'
+#define CMD_VOL_DOWN 'D'
 
 /* -------------------------------------------------------------------------- */
 /* FreeRTOS objects                                                            */
@@ -188,9 +190,10 @@ static void gpio_irq_handler(uint gpio, uint32_t events) {
         return;
 
     int btn_id = -1;
-    if (gpio == BTN_PIN_R) btn_id = BTN_ID_START;
-    if (gpio == BTN_PIN_G) btn_id = BTN_ID_PAUSE;
-    if (gpio == BTN_PIN_B) btn_id = BTN_ID_VOLUME;
+    if (gpio == BTN_PIN_R)        btn_id = BTN_ID_START;
+    if (gpio == BTN_PIN_G)        btn_id = BTN_ID_PAUSE;
+    if (gpio == BTN_PIN_B)        btn_id = BTN_ID_VOL_UP;
+    if (gpio == BTN_PIN_VOL_DOWN) btn_id = BTN_ID_VOL_DOWN;
 
     if (btn_id < 0)
         return;
@@ -317,9 +320,10 @@ static void task_bluetooth(void *param) {
         /* Check for button press (non-blocking) */
         if (xQueueReceive(xQueueButtons, &btn, 0) == pdTRUE) {
             switch (btn) {
-                case BTN_ID_START:  send_cmd(CMD_START);  break;
-                case BTN_ID_PAUSE:  send_cmd(CMD_PAUSE);  break;
-                case BTN_ID_VOLUME: send_cmd(CMD_VOLUME); break;
+                case BTN_ID_START:    send_cmd(CMD_START);    break;
+                case BTN_ID_PAUSE:    send_cmd(CMD_PAUSE);    break;
+                case BTN_ID_VOL_UP:   send_cmd(CMD_VOL_UP);   break;
+                case BTN_ID_VOL_DOWN: send_cmd(CMD_VOL_DOWN); break;
                 default: break;
             }
         }
@@ -370,6 +374,8 @@ static void task_led(void *param) {
 /* -------------------------------------------------------------------------- */
 int main(void) {
     stdio_init_all();
+    sleep_ms(3000); /* aguarda USB CDC conectar antes de qualquer printf */
+    printf("=== Skate Controller Boot ===\n");
 
     /* Debug GPIO pins for oscilloscope WCET measurement */
     const uint dbg_pins[] = {DBG_SENSOR, DBG_BT, DBG_LED};
@@ -380,7 +386,7 @@ int main(void) {
     }
 
     /* Button GPIO with pull-up and interrupt on falling edge */
-    const uint btn_pins[] = {BTN_PIN_R, BTN_PIN_G, BTN_PIN_B};
+    const uint btn_pins[] = {BTN_PIN_R, BTN_PIN_G, BTN_PIN_B, (uint)BTN_PIN_VOL_DOWN};
     for (uint p : btn_pins) {
         gpio_init(p);
         gpio_set_dir(p, GPIO_IN);

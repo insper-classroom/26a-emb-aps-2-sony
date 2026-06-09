@@ -35,8 +35,8 @@ add_executable(pico_emb
     main.cpp
     )
 
-pico_enable_stdio_usb(pico_emb 1)
-pico_enable_stdio_uart(pico_emb 0)
+pico_enable_stdio_usb(pico_emb 0)
+pico_enable_stdio_uart(pico_emb 1)
 
 target_include_directories(pico_emb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
@@ -55,6 +55,7 @@ target_link_libraries(pico_emb PRIVATE
     hardware_flash
     hardware_pio
     hardware_dma
+    hardware_pwm
     )
 # Set the nunber of cores to 1.
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here

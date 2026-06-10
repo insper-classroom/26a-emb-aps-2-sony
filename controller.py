@@ -20,7 +20,7 @@ from pynput.keyboard import Key, Controller
 
 # ── Configuração ──────────────────────────────────────────────────────────────
 
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 
 # Comando recebido → tecla pressionada
 # Mude KEY_WAVE para Key.right se quiser esquivar para a direita

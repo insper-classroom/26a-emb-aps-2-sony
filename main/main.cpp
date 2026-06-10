@@ -37,6 +37,7 @@
 
 #include "mpu6050.h"
 #include "pins.h"
+#include "hc06.h"
 
 /* ── Bluetooth (HC-06, UART1) ─────────────────────────────────────────────── */
 #define BT_UART     uart1
@@ -54,7 +55,7 @@
 /* ── Debug WCET (osciloscópio) ───────────────────────────────────────────── */
 #define DBG_SENSOR  26
 #define DBG_BT      27
-#define DBG_LED     28
+/* GP28 reservado para HC06_ENABLE_PIN — não usar como debug */
 
 /* ── Botões ──────────────────────────────────────────────────────────────── */
 #define BTN_START    0
@@ -321,7 +322,6 @@ static void task_led(void *p) {
     while (1) {
         int label;
         if (xQueueReceive(xQueueLed, &label, portMAX_DELAY) == pdTRUE) {
-            gpio_put(DBG_LED, 1);
             switch (label) {
                 case LABEL_IDLE:   rgb(0,0,0); break;
                 case LABEL_JUMP:   rgb(0,0,1); break;  /* azul    */
@@ -330,7 +330,6 @@ static void task_led(void *p) {
                 case LABEL_CROUCH: rgb(1,0,1); break;  /* roxo    */
                 default:           rgb(1,0,0); break;  /* vermelho = desconhecido */
             }
-            gpio_put(DBG_LED, 0);
         }
     }
 }
@@ -353,8 +352,11 @@ int main(void) {
     uart_set_fifo_enabled(BT_UART, false);
     printf("[bt] UART1 @ %d baud — GP%d/GP%d\n", BT_BAUD, BT_TX_PIN, BT_RX_PIN);
 
-    /* Debug GPIO */
-    for (uint pin : {(uint)DBG_SENSOR, (uint)DBG_BT, (uint)DBG_LED}) {
+    /* Configura HC-06 via AT (nome + PIN) — bloqueante, antes do scheduler */
+    hc06_config((char *)"SkateCtrl", (char *)"1234");
+
+    /* Debug GPIO (GP28 excluído — usado pelo HC06_ENABLE_PIN) */
+    for (uint pin : {(uint)DBG_SENSOR, (uint)DBG_BT}) {
         gpio_init(pin); gpio_set_dir(pin, GPIO_OUT); gpio_put(pin, 0);
     }
 

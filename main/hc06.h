@@ -5,6 +5,10 @@
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── Pinos e periférico ───────────────────────────────────────────────────── */
 #define HC06_UART_ID    uart1
 #define HC06_BAUD_RATE  115200   /* baud final após configuração AT          */
@@ -15,7 +19,7 @@
 
 /* Pino KEY/EN do HC-06 — usado apenas durante configuração AT               */
 /* Conecte o pino KEY do módulo ao GP10 (ou deixe solto se não tiver)        */
-#define HC06_ENABLE_PIN 10
+#define HC06_ENABLE_PIN 28
 
 /* Pino STATE do HC-06 — HIGH quando pareado e conectado                     */
 #define HC06_STATE_PIN  22
@@ -27,5 +31,9 @@ bool hc06_set_pin(char pin[]);
 bool hc06_set_baud_115200(void);
 bool hc06_set_at_mode(int on);
 bool hc06_config(char name[], char pin[]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // HC06_H_

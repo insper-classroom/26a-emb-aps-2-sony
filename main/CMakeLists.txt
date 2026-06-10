@@ -100,8 +100,8 @@ add_executable(pico_emb
     ${EI_TF_KERNELS_INTERNAL_SOURCES}
     )
 
-pico_enable_stdio_usb(pico_emb 0)
-pico_enable_stdio_uart(pico_emb 1)
+pico_enable_stdio_usb(pico_emb 1)
+pico_enable_stdio_uart(pico_emb 0)
 
 target_include_directories(pico_emb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}

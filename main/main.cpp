@@ -4,7 +4,9 @@
  *
  * Hardware (Raspberry Pi Pico / RP2040):
  *   MPU6050 IMU  : I2C0  SDA=GP16, SCL=GP17
- *   HC-06 BT     : UART1 TX=GP4,   RX=GP5,  9600 baud
+ *   HC-06 BT     : UART1 TX=GP4 (Pico→HC06), RX=GP5 (HC06→Pico), 115200 baud
+ *   HC-06 KEY/EN : GP10  (modo AT — conecte ao pino KEY do módulo)
+ *   HC-06 STATE  : GP22  (HIGH quando pareado — opcional)
  *   Botões       : GP18 (Start), GP19 (Pause), GP20 (Vol+), GP21 (Vol-)
  *   LED RGB      : GP6 (R), GP3 (G), GP2 (B)  — active HIGH
  *   Debug WCET   : GP26 (sensor), GP27 (bluetooth), GP28 (led)
@@ -15,7 +17,7 @@
  *   Core 1 → task_led        (feedback visual RGB)
  *
  * Comandos BT:  'J'=jump  'L'=left  'R'=right  'C'=crouch  'I'=idle
- *               'S'=start(Espaço) 'P'=pause(ESC) 'U'=vol+   'D'=vol-
+ *               'S'=start 'P'=pause 'U'=vol+   'D'=vol-
  *
  * Ordem das classes do modelo (alfabética, Edge Impulse):
  *   Confirme em ei-model/model-parameters/model_variables.h
@@ -36,7 +38,10 @@
 #include "task.h"
 #include "queue.h"
 
+#include "hardware/irq.h"
+
 #include "mpu6050.h"
+#include "hc06.h"
 #include "pins.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
@@ -50,11 +55,9 @@
 #define MPU_ADDR              MPU6050_I2C_DEFAULT   /* 0x68 */
 #define MPU_SENS_2G           16384.0f              /* LSB/g @ ±2g */
 
-/* HC-06 — UART1 */
-#define BT_UART               uart1
-#define BT_TX_PIN             4
-#define BT_RX_PIN             5
-#define BT_BAUD               9600
+/* HC-06 — herdado de hc06.h (HC06_UART_ID, HC06_BAUD_RATE, pinos) */
+/* Fila de TX: task_bluetooth deposita bytes; ISR envia via UART     */
+static QueueHandle_t xQueueBTTX;
 
 /* Pinos de debug para medir WCET/Jitter no osciloscópio (lab RTOS) */
 #define DBG_SENSOR            26   /* toggle durante task_sensor_ai  */
@@ -272,34 +275,42 @@ static void task_sensor_ai(void *param) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
+/*  task_tx  (Core 1)                                                          */
+/*  Consome bytes da xQueueBTTX e os envia pelo UART do HC-06.                 */
+/*  Separar TX em task própria é o padrão do lab: evita bloquear task_bt.      */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+static void task_tx(void *param) {
+    (void)param;
+    uint8_t ch;
+    while (1) {
+        if (xQueueReceive(xQueueBTTX, &ch, portMAX_DELAY) == pdTRUE) {
+            gpio_put(DBG_BT, 1);
+            uart_putc_raw(HC06_UART_ID, ch);
+            gpio_put(DBG_BT, 0);
+        }
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
 /*  task_bluetooth  (Core 1)                                                   */
-/*  Recebe labels de movimento e eventos de botão, envia byte via HC-06.       */
+/*  Recebe labels de movimento e eventos de botão, deposita bytes na fila TX.  */
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
 static void task_bluetooth(void *param) {
     (void)param;
 
-    uart_init(BT_UART, BT_BAUD);
-    gpio_set_function(BT_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(BT_RX_PIN, GPIO_FUNC_UART);
-    uart_set_hw_flow(BT_UART, false, false);
-    uart_set_format(BT_UART, 8, 1, UART_PARITY_NONE);
-    printf("[bt] UART1 OK — TX=GP%d RX=GP%d @ %d baud\n",
-           BT_TX_PIN, BT_RX_PIN, BT_BAUD);
-
-    /* Envia 1 byte de comando + newline; toggle no pino de debug */
+    /* Deposita cmd + '\n' na fila de TX */
     auto send = [](char cmd) {
-        gpio_put(DBG_BT, 1);
-        const uint8_t msg[2] = {(uint8_t)cmd, '\n'};
-        uart_write_blocking(BT_UART, msg, 2);
-        gpio_put(DBG_BT, 0);
+        uint8_t bytes[2] = {(uint8_t)cmd, '\n'};
+        xQueueSend(xQueueBTTX, &bytes[0], 0);
+        xQueueSend(xQueueBTTX, &bytes[1], 0);
     };
 
     int last_label = LABEL_IDLE;
 
     while (1) {
         int label;
-        /* Recebe resultado da inferência */
         if (xQueueReceive(xQueueMotion, &label, 0) == pdTRUE) {
             if (label != last_label) {
                 last_label = label;
@@ -315,7 +326,6 @@ static void task_bluetooth(void *param) {
         }
 
         int btn;
-        /* Recebe evento de botão */
         if (xQueueReceive(xQueueButtons, &btn, 0) == pdTRUE) {
             switch (btn) {
                 case BTN_ID_START:    send(CMD_START);    break;
@@ -377,12 +387,27 @@ int main(void) {
     printf("\n=== Skate Controller — Dual-Core FreeRTOS ===\n");
     printf("Core 0: sensor_ai | Core 1: bluetooth + led\n\n");
 
-    /* Pinos de debug WCET (osciloscópio) */
+    /* ── HC-06: inicializa UART e configura módulo via AT commands ─────────
+     * Deve acontecer ANTES do scheduler pois usa sleep_ms internamente.
+     * hc06_config() detecta baud (9600 ou 115200), configura nome/PIN e
+     * garante que o módulo opera a 115200 no fim.                          */
+    uart_init(HC06_UART_ID, HC06_BAUD_RATE);
+    gpio_set_function(HC06_TX_PIN, UART_FUNCSEL_NUM(HC06_UART_ID, HC06_TX_PIN));
+    gpio_set_function(HC06_RX_PIN, UART_FUNCSEL_NUM(HC06_UART_ID, HC06_RX_PIN));
+    uart_set_baudrate(HC06_UART_ID, HC06_BAUD_RATE);
+    uart_set_hw_flow(HC06_UART_ID, false, false);
+    uart_set_format(HC06_UART_ID, 8, 1, UART_PARITY_NONE);
+    uart_set_fifo_enabled(HC06_UART_ID, false);  /* byte a byte, sem buffer */
+
+    hc06_config("SKATE-CTRL", "1234");
+    printf("[main] HC-06 pronto @ 115200 baud\n\n");
+
+    /* ── Pinos de debug WCET (osciloscópio) ──────────────────────────────── */
     for (uint p : {(uint)DBG_SENSOR, (uint)DBG_BT, (uint)DBG_LED}) {
         gpio_init(p); gpio_set_dir(p, GPIO_OUT); gpio_put(p, 0);
     }
 
-    /* Botões com pull-up e interrupção na borda de descida */
+    /* ── Botões com pull-up e interrupção na borda de descida ────────────── */
     for (uint p : {(uint)BTN_PIN_RED, (uint)BTN_PIN_GREEN,
                    (uint)BTN_PIN_BLUE, (uint)BTN_PIN_YELLOW}) {
         gpio_init(p);
@@ -391,15 +416,18 @@ int main(void) {
         gpio_set_irq_enabled_with_callback(p, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     }
 
-    /* Filas */
-    xQueueMotion  = xQueueCreate(5,  sizeof(int));
-    xQueueButtons = xQueueCreate(10, sizeof(int));
-    xQueueLed     = xQueueCreate(5,  sizeof(int));
-    configASSERT(xQueueMotion && xQueueButtons && xQueueLed);
+    /* ── Filas ───────────────────────────────────────────────────────────── */
+    xQueueMotion  = xQueueCreate(5,   sizeof(int));
+    xQueueButtons = xQueueCreate(10,  sizeof(int));
+    xQueueLed     = xQueueCreate(5,   sizeof(int));
+    xQueueBTTX    = xQueueCreate(256, sizeof(uint8_t));
+    configASSERT(xQueueMotion && xQueueButtons && xQueueLed && xQueueBTTX);
 
-    /* Criação das tasks */
+    /* ── Criação das tasks ───────────────────────────────────────────────── */
+    TaskHandle_t hTX = NULL;
     xTaskCreate(task_sensor_ai, "sensor", 16384, NULL, 3, &hSensor);
     xTaskCreate(task_bluetooth, "bt",      2048, NULL, 2, &hBT);
+    xTaskCreate(task_tx,        "tx",       512, NULL, 2, &hTX);
     xTaskCreate(task_led,       "led",     1024, NULL, 1, &hLed);
 
     /*
@@ -409,9 +437,10 @@ int main(void) {
      *
      * Isso evita que a inferência da IA interfira no envio Bluetooth e vice-versa.
      */
-    vTaskCoreAffinitySet(hSensor, (1 << 0));
-    vTaskCoreAffinitySet(hBT,     (1 << 1));
-    vTaskCoreAffinitySet(hLed,    (1 << 1));
+    vTaskCoreAffinitySet(hSensor, (1 << 0));   /* Core 0: sensor + IA    */
+    vTaskCoreAffinitySet(hBT,     (1 << 1));   /* Core 1: bluetooth ctrl */
+    vTaskCoreAffinitySet(hTX,     (1 << 1));   /* Core 1: bluetooth TX   */
+    vTaskCoreAffinitySet(hLed,    (1 << 1));   /* Core 1: led            */
 
     printf("Tasks criadas — iniciando scheduler (SMP: 2 cores)\n");
     vTaskStartScheduler();

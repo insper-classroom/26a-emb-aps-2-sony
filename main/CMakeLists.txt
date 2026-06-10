@@ -88,7 +88,6 @@ endforeach()
 
 add_executable(pico_emb
     main.cpp
-    hc06.c
     ${EI_MODEL_SOURCES}
     ${EI_CLASSIFIER_SOURCES}
     ${EI_DSP_SOURCES}

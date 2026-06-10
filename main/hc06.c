@@ -99,8 +99,9 @@ bool hc06_config(char name[], char pin[]) {
     }
 
     if (!connected) {
-        printf("[hc06] ERRO: HC-06 nao respondeu. Verifique conexoes e reinicie.\n");
-        while (1);
+        printf("[hc06] ERRO: HC-06 nao respondeu. Continuando sem config AT.\n");
+        hc06_set_at_mode(0);
+        return false;
     }
 
     printf("[hc06] Conectado!\n");

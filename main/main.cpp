@@ -6,7 +6,7 @@
  *   MPU6050 IMU  : I2C0  SDA=GP16, SCL=GP17
  *   HC-06 BT     : UART1 TX=GP4,   RX=GP5,  9600 baud
  *   Botões       : GP18 (Start), GP19 (Pause), GP20 (Vol+), GP21 (Vol-)
- *   LED RGB      : GP6 (R), GP2 (G), GP3 (B)  — active HIGH
+ *   LED RGB      : GP6 (R), GP3 (G), GP2 (B)  — active HIGH
  *   Debug WCET   : GP26 (sensor), GP27 (bluetooth), GP28 (led)
  *
  * Tasks e cores:
@@ -15,7 +15,7 @@
  *   Core 1 → task_led        (feedback visual RGB)
  *
  * Comandos BT:  'J'=jump  'L'=left  'R'=right  'C'=crouch  'I'=idle
- *               'S'=start 'P'=pause 'U'=vol+   'D'=vol-
+ *               'S'=start(Espaço) 'P'=pause(ESC) 'U'=vol+   'D'=vol-
  *
  * Ordem das classes do modelo (alfabética, Edge Impulse):
  *   Confirme em ei-model/model-parameters/model_variables.h
@@ -194,10 +194,10 @@ static void gpio_irq_handler(uint gpio, uint32_t events) {
     if (!(events & GPIO_IRQ_EDGE_FALL)) return;
 
     int id = -1;
-    if      (gpio == (uint)BTN_PIN_R)        id = BTN_ID_START;
-    else if (gpio == (uint)BTN_PIN_G)        id = BTN_ID_PAUSE;
-    else if (gpio == (uint)BTN_PIN_B)        id = BTN_ID_VOL_UP;
-    else if (gpio == (uint)BTN_PIN_VOL_DOWN) id = BTN_ID_VOL_DOWN;
+    if      (gpio == (uint)BTN_PIN_RED)    id = BTN_ID_START;
+    else if (gpio == (uint)BTN_PIN_GREEN)  id = BTN_ID_PAUSE;
+    else if (gpio == (uint)BTN_PIN_BLUE)   id = BTN_ID_VOL_UP;
+    else if (gpio == (uint)BTN_PIN_YELLOW) id = BTN_ID_VOL_DOWN;
     if (id < 0) return;
 
     BaseType_t woken = pdFALSE;
@@ -383,8 +383,8 @@ int main(void) {
     }
 
     /* Botões com pull-up e interrupção na borda de descida */
-    for (uint p : {(uint)BTN_PIN_R, (uint)BTN_PIN_G,
-                   (uint)BTN_PIN_B, (uint)BTN_PIN_VOL_DOWN}) {
+    for (uint p : {(uint)BTN_PIN_RED, (uint)BTN_PIN_GREEN,
+                   (uint)BTN_PIN_BLUE, (uint)BTN_PIN_YELLOW}) {
         gpio_init(p);
         gpio_set_dir(p, GPIO_IN);
         gpio_pull_up(p);

@@ -32,9 +32,9 @@ COMMANDS = {
     b'R': Key.right,   # right  → direita     (→)
     b'C': Key.down,    # crouch → abaixar     (↓)
     b'I': None,        # idle   → nada
-    b'S': Key.enter,   # start      → Enter
-    b'P': 'p',         # pause      → P
-    b'V': None,        # volume up  → sem mapeamento no jogo
+    b'S': Key.space,   # start      → Espaço
+    b'P': Key.esc,     # pause      → ESC
+    b'U': None,        # volume up  → sem mapeamento no jogo
     b'D': None,        # volume down → sem mapeamento no jogo
 }
 
@@ -46,6 +46,8 @@ COOLDOWN = {
     b'C': 400,
     b'S': 1500,
     b'P': 1000,
+    b'U': 500,
+    b'D': 500,
 }
 DEFAULT_COOLDOWN = 300
 
@@ -104,7 +106,7 @@ def run(port: str):
     print("Conectado! Aguardando comandos do skate...\n")
     print("  J = pular (↑)        C = agachar (↓)")
     print("  L = esquerda (←)    R = direita (→)")
-    print("  S = start (Enter)   P = pause (P)")
+    print("  S = start (Espaço)  P = pause (ESC)")
     print("  Ctrl+C para sair\n")
 
     buffer = b""
@@ -149,9 +151,9 @@ def run(port: str):
                         b'L': "ESQUERDA ←",
                         b'R': "DIREITA  →",
                         b'C': "AGACHAR  ↓",
-                        b'S': "START    ↵",
-                        b'P': "PAUSE    P",
-                        b'V': "VOL UP    ",
+                        b'S': "START    ⎵",
+                        b'P': "PAUSE    ESC",
+                        b'U': "VOL UP    ",
                         b'D': "VOL DOWN  ",
                     }.get(cmd, cmd.decode(errors='?'))
                     print(f"[{time.strftime('%H:%M:%S')}] {label}")

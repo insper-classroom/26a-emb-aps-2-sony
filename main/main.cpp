@@ -1,16 +1,25 @@
 /*
- * Skate Controller for Subway Surfers
- * RTOS firmware: FreeRTOS + Edge Impulse (ADXL345 + Bluetooth)
+ * Skate Controller — Subway Surfers
+ * FreeRTOS SMP (dual-core) + Edge Impulse + HC-06 Bluetooth
  *
- * Hardware (Pico 2 / RP2350):
- *   ADXL345 IMU  : I2C1 SDA=GP18, SCL=GP19
- *   Bluetooth HC : UART0 TX=GP12, RX=GP13, 9600 baud
- *   Buttons      : GP4 (Start), GP5 (Pause), GP6 (Volume)
- *   LED RGB      : GP7 (R), GP8 (G), GP9 (B)  -- active HIGH
- *   Debug GPIO   : GP20 (sensor task), GP21 (BT task), GP22 (LED task)
+ * Hardware (Raspberry Pi Pico / RP2040):
+ *   MPU6050 IMU  : I2C0  SDA=GP16, SCL=GP17
+ *   HC-06 BT     : UART1 TX=GP4,   RX=GP5,  9600 baud
+ *   Botões       : GP18 (Start), GP19 (Pause), GP20 (Vol+), GP21 (Vol-)
+ *   LED RGB      : GP6 (R), GP2 (G), GP3 (B)  — active HIGH
+ *   Debug WCET   : GP26 (sensor), GP27 (bluetooth), GP28 (led)
  *
- * Model classes: 0=idle, 1=updown (jump), 2=wave (dodge)
- * BT commands sent: 'J'=jump, 'W'=wave, 'I'=idle, 'S'=start, 'P'=pause, 'V'=volume
+ * Tasks e cores:
+ *   Core 0 → task_sensor_ai  (amostragem 83 Hz + inferência EI)
+ *   Core 1 → task_bluetooth  (envia comandos HC-06)
+ *   Core 1 → task_led        (feedback visual RGB)
+ *
+ * Comandos BT:  'J'=jump  'L'=left  'R'=right  'C'=crouch  'I'=idle
+ *               'S'=start 'P'=pause 'U'=vol+   'D'=vol-
+ *
+ * Ordem das classes do modelo (alfabética, Edge Impulse):
+ *   Confirme em ei-model/model-parameters/model_variables.h
+ *   ei_classifier_inferencing_categories[]
  */
 
 #include <stdio.h>
@@ -22,7 +31,6 @@
 #include "hardware/i2c.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
-#include "hardware/irq.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -31,231 +39,222 @@
 #include "mpu6050.h"
 #include "pins.h"
 
-/* ── MPU6050 driver (I2C0, SDA=GP0, SCL=GP1) ────────────────────────────── */
-#define MPU_I2C      i2c0
-#define MPU_SDA_PIN  16
-#define MPU_SCL_PIN  17
-#define MPU_ADDR     MPU6050_I2C_DEFAULT   /* 0x68 */
-#define MPU_ACCEL_2G_SENSITIVITY 16384.0f  /* LSB/g at ±2g range */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Configuração de pinos                                                      */
+/* ═══════════════════════════════════════════════════════════════════════════ */
 
-static void mpu6050_write_reg(uint8_t reg, uint8_t val) {
+/* MPU6050 — I2C0 */
+#define MPU_I2C               i2c0
+#define MPU_SDA_PIN           16
+#define MPU_SCL_PIN           17
+#define MPU_ADDR              MPU6050_I2C_DEFAULT   /* 0x68 */
+#define MPU_SENS_2G           16384.0f              /* LSB/g @ ±2g */
+
+/* HC-06 — UART1 */
+#define BT_UART               uart1
+#define BT_TX_PIN             4
+#define BT_RX_PIN             5
+#define BT_BAUD               9600
+
+/* Pinos de debug para medir WCET/Jitter no osciloscópio (lab RTOS) */
+#define DBG_SENSOR            26   /* toggle durante task_sensor_ai  */
+#define DBG_BT                27   /* toggle durante task_bluetooth  */
+#define DBG_LED               28   /* toggle durante task_led        */
+
+/* IDs dos botões (valores enviados pela ISR na fila) */
+#define BTN_ID_START          0
+#define BTN_ID_PAUSE          1
+#define BTN_ID_VOL_UP         2
+#define BTN_ID_VOL_DOWN       3
+
+/*
+ * Labels do modelo — ordem ALFABÉTICA (Edge Impulse ordena assim).
+ * Verifique ei_classifier_inferencing_categories[] e ajuste se necessário.
+ *   0 = "crouch"  → agachar
+ *   1 = "idle"    → parado
+ *   2 = "jump"    → pular
+ *   3 = "left"    → esquerda
+ *   4 = "right"   → direita
+ */
+#define LABEL_CROUCH          0
+#define LABEL_IDLE            1
+#define LABEL_JUMP            2
+#define LABEL_LEFT            3
+#define LABEL_RIGHT           4
+
+/* Comandos enviados via Bluetooth (1 byte + '\n') */
+#define CMD_IDLE              'I'
+#define CMD_JUMP              'J'
+#define CMD_LEFT              'L'
+#define CMD_RIGHT             'R'
+#define CMD_CROUCH            'C'
+#define CMD_START             'S'
+#define CMD_PAUSE             'P'
+#define CMD_VOL_UP            'U'
+#define CMD_VOL_DOWN          'D'
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  EI porting layer                                                           */
+/*  Deve ser definido ANTES de incluir os headers do Edge Impulse              */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+#include "edge-impulse-sdk/dsp/returntypes.h"
+
+void ei_printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
+void  ei_printf_float(float f)  { printf("%f", f); }
+void  ei_putchar(char c)        { putchar(c); }
+char  ei_getchar(void)          { return (char)getchar_timeout_us(0); }
+
+/* Memória thread-safe: usa heap do FreeRTOS quando o scheduler já rodou */
+void *ei_malloc(size_t sz) {
+    return (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+        ? pvPortMalloc(sz) : malloc(sz);
+}
+void *ei_calloc(size_t n, size_t sz) {
+    void *p = ei_malloc(n * sz);
+    if (p) memset(p, 0, n * sz);
+    return p;
+}
+void ei_free(void *p) {
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+        vPortFree(p);
+    else
+        free(p);
+}
+
+EI_IMPULSE_ERROR ei_run_impulse_check_canceled(void) { return EI_IMPULSE_OK; }
+void             ei_serial_set_baudrate(int b)        { (void)b; }
+uint64_t         ei_read_timer_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+uint64_t         ei_read_timer_us(void) { return to_us_since_boot(get_absolute_time()); }
+EI_IMPULSE_ERROR ei_sleep(int32_t ms)  { vTaskDelay(pdMS_TO_TICKS(ms)); return EI_IMPULSE_OK; }
+
+#include "edge-impulse-sdk/classifier/ei_run_classifier.h"
+#include "edge-impulse-sdk/dsp/numpy.hpp"
+
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  Driver MPU6050                                                             */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+static void mpu_write(uint8_t reg, uint8_t val) {
     uint8_t buf[2] = {reg, val};
     i2c_write_blocking(MPU_I2C, MPU_ADDR, buf, 2, false);
 }
 
-static bool mpu6050_init(void) {
+static bool mpu_init(void) {
     i2c_init(MPU_I2C, 400 * 1000);
     gpio_set_function(MPU_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(MPU_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(MPU_SDA_PIN);
     gpio_pull_up(MPU_SCL_PIN);
 
-    /* Wake up (exits sleep mode) */
-    mpu6050_write_reg(MPUREG_PWR_MGMT_1, 0x00);
+    mpu_write(MPUREG_PWR_MGMT_1, 0x00);   /* sai do sleep mode */
     sleep_ms(100);
 
-    /* Verify device is present: WHO_AM_I should return 0x68 */
-    uint8_t reg = MPUREG_WHOAMI;
-    uint8_t id  = 0;
+    uint8_t reg = MPUREG_WHOAMI, id = 0;
     i2c_write_blocking(MPU_I2C, MPU_ADDR, &reg, 1, true);
     i2c_read_blocking (MPU_I2C, MPU_ADDR, &id,  1, false);
     if (id != 0x68) return false;
 
-    /* Accel range ±2g, gyro range ±250°/s (defaults, no change needed) */
-    mpu6050_write_reg(MPUREG_ACCEL_CONFIG, 0x00);
-
-    /* Sample rate: 1kHz / (1 + SMPLRT_DIV) — set 100 Hz (divider=9) */
-    mpu6050_write_reg(MPUREG_SMPLRT_DIV, 9);
-
+    mpu_write(MPUREG_ACCEL_CONFIG, 0x00);  /* range ±2g  */
+    mpu_write(MPUREG_SMPLRT_DIV,   9);     /* 100 Hz     */
     return true;
 }
 
-static void mpu6050_read_accel(float *ax, float *ay, float *az) {
-    uint8_t reg = MPUREG_ACCEL_XOUT_H;
-    uint8_t raw[6];
+static void mpu_read_accel(float *ax, float *ay, float *az) {
+    uint8_t reg = MPUREG_ACCEL_XOUT_H, raw[6];
     i2c_write_blocking(MPU_I2C, MPU_ADDR, &reg, 1, true);
     i2c_read_blocking (MPU_I2C, MPU_ADDR, raw, 6, false);
 
-    int16_t x = (int16_t)((raw[0] << 8) | raw[1]);
-    int16_t y = (int16_t)((raw[2] << 8) | raw[3]);
-    int16_t z = (int16_t)((raw[4] << 8) | raw[5]);
-
-    *ax = (x / MPU_ACCEL_2G_SENSITIVITY) * 9.80665f;
-    *ay = (y / MPU_ACCEL_2G_SENSITIVITY) * 9.80665f;
-    *az = (z / MPU_ACCEL_2G_SENSITIVITY) * 9.80665f;
+    *ax = (int16_t)((raw[0] << 8) | raw[1]) / MPU_SENS_2G * 9.80665f;
+    *ay = (int16_t)((raw[2] << 8) | raw[3]) / MPU_SENS_2G * 9.80665f;
+    *az = (int16_t)((raw[4] << 8) | raw[5]) / MPU_SENS_2G * 9.80665f;
 }
 
-/* EI porting layer — plain C++ linkage (matches tflite compiled model declarations) */
-#include "edge-impulse-sdk/dsp/returntypes.h"
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  FreeRTOS — filas e handles de task                                         */
+/* ═══════════════════════════════════════════════════════════════════════════ */
 
-void ei_printf(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    vprintf(format, args);
-    va_end(args);
-}
+static QueueHandle_t xQueueMotion;    /* sensor_ai  → bluetooth  (int label) */
+static QueueHandle_t xQueueButtons;   /* ISR        → bluetooth  (int btn)   */
+static QueueHandle_t xQueueLed;       /* sensor_ai  → led        (int label) */
 
-void ei_printf_float(float f) { printf("%f", f); }
-void ei_putchar(char c)       { putchar(c); }
-char ei_getchar(void)         { return (char)getchar_timeout_us(0); }
+static TaskHandle_t  hSensor = NULL;
+static TaskHandle_t  hBT     = NULL;
+static TaskHandle_t  hLed    = NULL;
 
-/* Thread-safe memory: use FreeRTOS heap when scheduler is running */
-void *ei_malloc(size_t size) {
-    return (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
-        ? pvPortMalloc(size)
-        : malloc(size);
-}
-void *ei_calloc(size_t count, size_t size) {
-    void *ptr = ei_malloc(count * size);
-    if (ptr) memset(ptr, 0, count * size);
-    return ptr;
-}
-void ei_free(void *ptr) {
-    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
-        vPortFree(ptr);
-    else
-        free(ptr);
-}
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  ISR — botões                                                               */
+/* ═══════════════════════════════════════════════════════════════════════════ */
 
-EI_IMPULSE_ERROR ei_run_impulse_check_canceled(void) { return EI_IMPULSE_OK; }
-void ei_serial_set_baudrate(int baud)                { (void)baud; }
-uint64_t ei_read_timer_ms(void)                      { return to_ms_since_boot(get_absolute_time()); }
-uint64_t ei_read_timer_us(void)                      { return to_us_since_boot(get_absolute_time()); }
-EI_IMPULSE_ERROR ei_sleep(int32_t ms)                { vTaskDelay(pdMS_TO_TICKS(ms)); return EI_IMPULSE_OK; }
-
-#include "edge-impulse-sdk/classifier/ei_run_classifier.h"
-#include "edge-impulse-sdk/dsp/numpy.hpp"
-
-/* -------------------------------------------------------------------------- */
-/* Pin / peripheral config                                                     */
-/* -------------------------------------------------------------------------- */
-#define BT_UART_ID   uart1
-#define BT_TX_PIN    5
-#define BT_RX_PIN    4
-#define BT_BAUD      9600
-
-/* Debug GPIO for WCET / jitter measurement with an oscilloscope */
-#define DBG_SENSOR   20
-#define DBG_BT       21
-#define DBG_LED      22
-
-/* Button IDs sent over xQueueButtons */
-#define BTN_ID_START    0   /* GP18 BRANCO  */
-#define BTN_ID_PAUSE    1   /* GP19 AZUL    */
-#define BTN_ID_VOL_UP   2   /* GP20 AMARELO */
-#define BTN_ID_VOL_DOWN 3   /* GP21 VERDE   */
-
-/*
- * Motion label indices — devem bater com a ordem ALFABÉTICA das classes
- * no Edge Impulse (ele ordena por nome). Ao exportar o modelo, confirme em:
- *   ei-model/model-parameters/model_variables.h
- *   ei_classifier_inferencing_categories[] = { ..., ..., ... }
- *
- * Classes sugeridas para treino (nomes em inglês, ordem alfabética):
- *   0 = "backward"  → tail down / empurrar para trás  → agachar no jogo
- *   1 = "forward"   → nose down / empurrar para frente → pular no jogo
- *   2 = "idle"      → parado / rolando reto            → nada
- *   3 = "left"      → inclinar para esquerda           → mover esquerda
- *   4 = "right"     → inclinar para direita            → mover direita
- */
-#define LABEL_CROUNCH  0
-#define LABEL_IDLE     1
-#define LABEL_JUMP     2
-#define LABEL_LEFT     3
-#define LABEL_RIGHT    4
-
-/* BT command bytes (devem bater com controller.py) */
-#define CMD_IDLE     'I'
-#define CMD_JUMP     'J'
-#define CMD_LEFT     'L'
-#define CMD_RIGHT    'R'
-#define CMD_CROUCH   'C'
-#define CMD_START    'S'
-#define CMD_PAUSE    'P'
-#define CMD_VOL_UP   'V'
-#define CMD_VOL_DOWN 'D'
-
-/* -------------------------------------------------------------------------- */
-/* FreeRTOS objects                                                            */
-/* -------------------------------------------------------------------------- */
-static QueueHandle_t xQueueMotion;   /* sensor_ai  -> bluetooth (int label)  */
-static QueueHandle_t xQueueButtons;  /* ISR        -> bluetooth (int btn id) */
-static QueueHandle_t xQueueLed;      /* sensor_ai  -> led       (int label)  */
-
-/* -------------------------------------------------------------------------- */
-/* ISR: button handler                                                         */
-/* -------------------------------------------------------------------------- */
 static void gpio_irq_handler(uint gpio, uint32_t events) {
-    if (!(events & GPIO_IRQ_EDGE_FALL))
-        return;
+    if (!(events & GPIO_IRQ_EDGE_FALL)) return;
 
-    int btn_id = -1;
-    if (gpio == BTN_PIN_R)        btn_id = BTN_ID_START;
-    if (gpio == BTN_PIN_G)        btn_id = BTN_ID_PAUSE;
-    if (gpio == BTN_PIN_B)        btn_id = BTN_ID_VOL_UP;
-    if (gpio == BTN_PIN_VOL_DOWN) btn_id = BTN_ID_VOL_DOWN;
-
-    if (btn_id < 0)
-        return;
+    int id = -1;
+    if      (gpio == (uint)BTN_PIN_R)        id = BTN_ID_START;
+    else if (gpio == (uint)BTN_PIN_G)        id = BTN_ID_PAUSE;
+    else if (gpio == (uint)BTN_PIN_B)        id = BTN_ID_VOL_UP;
+    else if (gpio == (uint)BTN_PIN_VOL_DOWN) id = BTN_ID_VOL_DOWN;
+    if (id < 0) return;
 
     BaseType_t woken = pdFALSE;
-    xQueueSendFromISR(xQueueButtons, &btn_id, &woken);
+    xQueueSendFromISR(xQueueButtons, &id, &woken);
     portYIELD_FROM_ISR(woken);
 }
 
-/* -------------------------------------------------------------------------- */
-/* task_sensor_ai                                                              */
-/* Reads ADXL345 at ~83 Hz, fills EI input buffer, runs inference.            */
-/* -------------------------------------------------------------------------- */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  task_sensor_ai  (Core 0)                                                   */
+/*  Amostra MPU6050 a 83 Hz, preenche buffer EI, executa inferência.           */
+/*  Pino DBG_SENSOR (GP26) fica HIGH durante todo o corpo do tick —            */
+/*  o pico de largura quando ocorre a inferência é o WCET da task.             */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 static void task_sensor_ai(void *param) {
     (void)param;
 
-    if (!mpu6050_init()) {
-        ei_printf("[sensor] MPU6050 init failed! Check SDA=GP0, SCL=GP1, addr=0x68\n");
+    if (!mpu_init()) {
+        printf("[sensor] MPU6050 FALHOU (SDA=GP%d, SCL=GP%d, addr=0x%02X)\n",
+               MPU_SDA_PIN, MPU_SCL_PIN, MPU_ADDR);
         vTaskDelete(NULL);
         return;
     }
-    ei_printf("[sensor] MPU6050 ready.\n");
+    printf("[sensor] MPU6050 OK — iniciando amostragem a %.0f Hz\n",
+           1000.0f / EI_CLASSIFIER_INTERVAL_MS);
 
-    static float ei_buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
-    int sample_idx = 0;
+    static float ei_buf[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+    int idx = 0;
 
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    /* EI_CLASSIFIER_INTERVAL_MS = 12.048... ms => ~83 Hz */
-    const TickType_t xPeriod = pdMS_TO_TICKS((uint32_t)EI_CLASSIFIER_INTERVAL_MS);
+    TickType_t last = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS((uint32_t)EI_CLASSIFIER_INTERVAL_MS);
 
     while (1) {
-        gpio_put(DBG_SENSOR, 1); /* --- WCET start --- */
+        gpio_put(DBG_SENSOR, 1);                   /* ← WCET start */
 
-        float x, y, z;
-        mpu6050_read_accel(&x, &y, &z);
-        ei_buffer[sample_idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 0] = x;
-        ei_buffer[sample_idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 1] = y;
-        ei_buffer[sample_idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 2] = z;
-        sample_idx++;
+        float ax, ay, az;
+        mpu_read_accel(&ax, &ay, &az);
 
-        if (sample_idx >= EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
-            /* Full window collected – run inference (this tick has WCET spike) */
-            signal_t signal;
-            int err = numpy::signal_from_buffer(
-                ei_buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+        ei_buf[idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 0] = ax;
+        ei_buf[idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 1] = ay;
+        ei_buf[idx * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME + 2] = az;
+        idx++;
 
-            if (err == 0) {
-                ei_impulse_result_t result = {0};
-                EI_IMPULSE_ERROR ei_err =
-                    run_classifier(&signal, &result, false /* no debug */);
+        if (idx >= EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
+            /* Buffer cheio → inferência (este tick tem WCET máximo) */
+            signal_t sig;
+            if (numpy::signal_from_buffer(ei_buf, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &sig) == 0) {
+                ei_impulse_result_t res = {0};
+                if (run_classifier(&sig, &res, false) == EI_IMPULSE_OK) {
 
-                if (ei_err == EI_IMPULSE_OK) {
-                    /* Find label with highest confidence */
-                    int best = LABEL_IDLE;
-                    for (int i = 1; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-                        if (result.classification[i].value >
-                            result.classification[best].value)
+                    /* Encontra label com maior confiança */
+                    int best = 0;
+                    for (int i = 1; i < EI_CLASSIFIER_LABEL_COUNT; i++)
+                        if (res.classification[i].value > res.classification[best].value)
                             best = i;
-                    }
 
-                    /* Only act if confidence clears the model threshold */
-                    if (result.classification[best].value >= EI_CLASSIFIER_THRESHOLD) {
+                    if (res.classification[best].value >= EI_CLASSIFIER_THRESHOLD) {
                         xQueueSend(xQueueMotion, &best, 0);
                         xQueueSend(xQueueLed,    &best, 0);
                     } else {
@@ -264,155 +263,159 @@ static void task_sensor_ai(void *param) {
                     }
                 }
             }
-            sample_idx = 0;
+            idx = 0;
         }
 
-        gpio_put(DBG_SENSOR, 0); /* --- WCET end --- */
-
-        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+        gpio_put(DBG_SENSOR, 0);                   /* ← WCET end */
+        vTaskDelayUntil(&last, period);
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* task_bluetooth                                                              */
-/* Receives motion labels and button events, sends commands over UART.        */
-/* -------------------------------------------------------------------------- */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  task_bluetooth  (Core 1)                                                   */
+/*  Recebe labels de movimento e eventos de botão, envia byte via HC-06.       */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 static void task_bluetooth(void *param) {
     (void)param;
 
-    /* Init UART0 for HC-06 (or any serial BT module) */
-    uart_init(BT_UART_ID, BT_BAUD);
+    uart_init(BT_UART, BT_BAUD);
     gpio_set_function(BT_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(BT_RX_PIN, GPIO_FUNC_UART);
-    uart_set_hw_flow(BT_UART_ID, false, false);
-    uart_set_format(BT_UART_ID, 8, 1, UART_PARITY_NONE);
-    ei_printf("[bt] UART0 ready @ %d baud (TX=GP%d, RX=GP%d)\n",
-              BT_BAUD, BT_TX_PIN, BT_RX_PIN);
+    uart_set_hw_flow(BT_UART, false, false);
+    uart_set_format(BT_UART, 8, 1, UART_PARITY_NONE);
+    printf("[bt] UART1 OK — TX=GP%d RX=GP%d @ %d baud\n",
+           BT_TX_PIN, BT_RX_PIN, BT_BAUD);
 
-    auto send_cmd = [](char cmd) {
+    /* Envia 1 byte de comando + newline; toggle no pino de debug */
+    auto send = [](char cmd) {
         gpio_put(DBG_BT, 1);
-        char buf[2] = {cmd, '\n'};
-        uart_write_blocking(BT_UART_ID, (const uint8_t *)buf, 2);
+        const uint8_t msg[2] = {(uint8_t)cmd, '\n'};
+        uart_write_blocking(BT_UART, msg, 2);
         gpio_put(DBG_BT, 0);
     };
 
-    int last_motion = LABEL_IDLE;
+    int last_label = LABEL_IDLE;
 
     while (1) {
-        int motion;
-        int btn;
-
-        /* Check for new motion classification (non-blocking) */
-        if (xQueueReceive(xQueueMotion, &motion, 0) == pdTRUE) {
-            if (motion != last_motion) {
-                last_motion = motion;
-                switch (motion) {
-                    case LABEL_IDLE:    send_cmd(CMD_IDLE);   break;
-                    case LABEL_JUMP:    send_cmd(CMD_JUMP);   break;
-                    case LABEL_CROUNCH: send_cmd(CMD_CROUCH); break;
-                    case LABEL_LEFT:    send_cmd(CMD_LEFT);   break;
-                    case LABEL_RIGHT:   send_cmd(CMD_RIGHT);  break;
-                    default:             break;
+        int label;
+        /* Recebe resultado da inferência */
+        if (xQueueReceive(xQueueMotion, &label, 0) == pdTRUE) {
+            if (label != last_label) {
+                last_label = label;
+                switch (label) {
+                    case LABEL_IDLE:   send(CMD_IDLE);   break;
+                    case LABEL_JUMP:   send(CMD_JUMP);   break;
+                    case LABEL_LEFT:   send(CMD_LEFT);   break;
+                    case LABEL_RIGHT:  send(CMD_RIGHT);  break;
+                    case LABEL_CROUCH: send(CMD_CROUCH); break;
+                    default: break;
                 }
             }
         }
 
-        /* Check for button press (non-blocking) */
+        int btn;
+        /* Recebe evento de botão */
         if (xQueueReceive(xQueueButtons, &btn, 0) == pdTRUE) {
             switch (btn) {
-                case BTN_ID_START:    send_cmd(CMD_START);    break;
-                case BTN_ID_PAUSE:    send_cmd(CMD_PAUSE);    break;
-                case BTN_ID_VOL_UP:   send_cmd(CMD_VOL_UP);   break;
-                case BTN_ID_VOL_DOWN: send_cmd(CMD_VOL_DOWN); break;
+                case BTN_ID_START:    send(CMD_START);    break;
+                case BTN_ID_PAUSE:    send(CMD_PAUSE);    break;
+                case BTN_ID_VOL_UP:   send(CMD_VOL_UP);   break;
+                case BTN_ID_VOL_DOWN: send(CMD_VOL_DOWN); break;
                 default: break;
             }
         }
 
-        /* Block for up to 10ms waiting for new data */
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* task_led                                                                    */
-/* Updates RGB LED based on the current motion label.                         */
-/* -------------------------------------------------------------------------- */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  task_led  (Core 1)                                                         */
+/*  Atualiza LED RGB conforme o movimento detectado.                           */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 static void task_led(void *param) {
     (void)param;
 
-    gpio_init(LED_PIN_R); gpio_set_dir(LED_PIN_R, GPIO_OUT);
-    gpio_init(LED_PIN_G); gpio_set_dir(LED_PIN_G, GPIO_OUT);
-    gpio_init(LED_PIN_B); gpio_set_dir(LED_PIN_B, GPIO_OUT);
+    for (int p : {LED_PIN_R, LED_PIN_G, LED_PIN_B}) {
+        gpio_init(p);
+        gpio_set_dir(p, GPIO_OUT);
+        gpio_put(p, 0);
+    }
 
-    auto set_rgb = [](bool r, bool g, bool b) {
+    auto rgb = [](bool r, bool g, bool b) {
         gpio_put(LED_PIN_R, r);
         gpio_put(LED_PIN_G, g);
         gpio_put(LED_PIN_B, b);
     };
-
-    set_rgb(0, 0, 0);
 
     while (1) {
         int label;
         if (xQueueReceive(xQueueLed, &label, portMAX_DELAY) == pdTRUE) {
             gpio_put(DBG_LED, 1);
             switch (label) {
-                case LABEL_IDLE:    set_rgb(0, 0, 0); break; /* off    */
-                case LABEL_JUMP:    set_rgb(0, 0, 1); break; /* blue   = pular  */
-                case LABEL_CROUNCH: set_rgb(1, 0, 1); break; /* purple = agachar*/
-                case LABEL_LEFT:    set_rgb(0, 1, 0); break; /* green  = esq    */
-                case LABEL_RIGHT:   set_rgb(1, 1, 0); break; /* yellow = dir    */
-                default:           set_rgb(1, 0, 0); break; /* red = unknown */
+                case LABEL_IDLE:   rgb(0,0,0); break;  /* apagado */
+                case LABEL_JUMP:   rgb(0,0,1); break;  /* azul    */
+                case LABEL_LEFT:   rgb(0,1,0); break;  /* verde   */
+                case LABEL_RIGHT:  rgb(1,1,0); break;  /* amarelo */
+                case LABEL_CROUCH: rgb(1,0,1); break;  /* roxo    */
+                default:           rgb(1,0,0); break;  /* vermelho = erro */
             }
             gpio_put(DBG_LED, 0);
         }
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* main                                                                        */
-/* -------------------------------------------------------------------------- */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+/*  main                                                                       */
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
 int main(void) {
     stdio_init_all();
-    sleep_ms(3000); /* aguarda USB CDC conectar antes de qualquer printf */
-    printf("=== Skate Controller Boot ===\n");
+    sleep_ms(2000);  /* aguarda USB conectar */
+    printf("\n=== Skate Controller — Dual-Core FreeRTOS ===\n");
+    printf("Core 0: sensor_ai | Core 1: bluetooth + led\n\n");
 
-    /* Debug GPIO pins for oscilloscope WCET measurement */
-    const uint dbg_pins[] = {DBG_SENSOR, DBG_BT, DBG_LED};
-    for (uint p : dbg_pins) {
-        gpio_init(p);
-        gpio_set_dir(p, GPIO_OUT);
-        gpio_put(p, 0);
+    /* Pinos de debug WCET (osciloscópio) */
+    for (uint p : {(uint)DBG_SENSOR, (uint)DBG_BT, (uint)DBG_LED}) {
+        gpio_init(p); gpio_set_dir(p, GPIO_OUT); gpio_put(p, 0);
     }
 
-    /* Button GPIO with pull-up and interrupt on falling edge */
-    const uint btn_pins[] = {BTN_PIN_R, BTN_PIN_G, BTN_PIN_B, (uint)BTN_PIN_VOL_DOWN};
-    for (uint p : btn_pins) {
+    /* Botões com pull-up e interrupção na borda de descida */
+    for (uint p : {(uint)BTN_PIN_R, (uint)BTN_PIN_G,
+                   (uint)BTN_PIN_B, (uint)BTN_PIN_VOL_DOWN}) {
         gpio_init(p);
         gpio_set_dir(p, GPIO_IN);
         gpio_pull_up(p);
-        gpio_set_irq_enabled_with_callback(
-            p, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+        gpio_set_irq_enabled_with_callback(p, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     }
 
-    /* FreeRTOS queues */
+    /* Filas */
     xQueueMotion  = xQueueCreate(5,  sizeof(int));
     xQueueButtons = xQueueCreate(10, sizeof(int));
     xQueueLed     = xQueueCreate(5,  sizeof(int));
+    configASSERT(xQueueMotion && xQueueButtons && xQueueLed);
 
-    configASSERT(xQueueMotion);
-    configASSERT(xQueueButtons);
-    configASSERT(xQueueLed);
+    /* Criação das tasks */
+    xTaskCreate(task_sensor_ai, "sensor", 16384, NULL, 3, &hSensor);
+    xTaskCreate(task_bluetooth, "bt",      2048, NULL, 2, &hBT);
+    xTaskCreate(task_led,       "led",     1024, NULL, 1, &hLed);
 
-    /* Tasks */
-    xTaskCreate(task_sensor_ai, "sensor", 16384, NULL, 3, NULL);
-    xTaskCreate(task_bluetooth, "bt",      2048, NULL, 2, NULL);
-    xTaskCreate(task_led,       "led",     1024, NULL, 1, NULL);
+    /*
+     * Afinidade de core (SMP — dual-core):
+     *   Core 0 (bit 0): task_sensor_ai — crítica em tempo real (83 Hz + IA)
+     *   Core 1 (bit 1): task_bluetooth + task_led — I/O bound, orientadas a eventos
+     *
+     * Isso evita que a inferência da IA interfira no envio Bluetooth e vice-versa.
+     */
+    vTaskCoreAffinitySet(hSensor, (1 << 0));
+    vTaskCoreAffinitySet(hBT,     (1 << 1));
+    vTaskCoreAffinitySet(hLed,    (1 << 1));
 
-    ei_printf("Skate controller starting...\n");
+    printf("Tasks criadas — iniciando scheduler (SMP: 2 cores)\n");
     vTaskStartScheduler();
 
-    /* Should never reach here */
     while (1) {}
     return 0;
 }

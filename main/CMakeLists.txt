@@ -128,7 +128,11 @@ target_link_libraries(pico_emb PRIVATE
 # Set the nunber of cores to 1.
 # This defaults to 2 in FreeRTOSConfig_examples_common.h if not defined in here
 target_compile_definitions(pico_emb PRIVATE
-    configNUMBER_OF_CORES=1
+    # SMP — ativa os 2 núcleos do RP2040.
+    # O FreeRTOSConfig.h detecta FREE_RTOS_KERNEL_SMP e define:
+    #   configNUMBER_OF_CORES=2, configUSE_CORE_AFFINITY=1
+    FREE_RTOS_KERNEL_SMP=1
+    # Edge Impulse
     EI_CLASSIFIER_COMPILED=1
     EIDSP_USE_CMSIS_DSP=1
     EIDSP_LOAD_CMSIS_DSP_SOURCES=1
